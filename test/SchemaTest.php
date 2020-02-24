@@ -409,6 +409,17 @@ class SchemaTest extends PHPUnit_Framework_TestCase
     {"type":"record", "name":"foo", "doc":"doc string",
      "fields":[{"name":"bar", "type":"int", "order":"bad"}]}
 ', false);
+     // `"default":null` should not be lost in `to_avro`.
+     $record_examples []= new SchemaExample(
+        '{"type":"record","name":"foo","fields":[{"name":"bar","type":["null","string"],"default":null}]}',
+        true,
+        '{"type":"record","name":"foo","fields":[{"name":"bar","type":["null","string"],"default":null}]}');
+    // Don't lose the "doc" attributes of record fields.
+    $record_examples []= new SchemaExample(
+      '{"type":"record","name":"foo","fields":[{"name":"bar","type":["null","string"],"doc":"Bar name."}]}',
+      true,
+      '{"type":"record","name":"foo","fields":[{"name":"bar","type":["null","string"],"doc":"Bar name."}]}');
+
 
     self::$examples = array_merge($primitive_examples,
                                   $fixed_examples,
@@ -437,11 +448,42 @@ class SchemaTest extends PHPUnit_Framework_TestCase
                         array("bar", "baz", "blurfl"));
     $this->assertFalse(is_array(json_decode('null', true)));
     $this->assertEquals(json_decode('{"type": "null"}', true), array("type" => 'null'));
-    foreach (array('true', 'True', 'TRUE', 'tRue') as $truthy)
-    {
-      $this->assertEquals(json_decode($truthy, true), true, $truthy);
-    }
     $this->assertEquals(json_decode('"boolean"'), 'boolean');
+  }
+
+  function parse_bad_json_provider()
+  {
+    return array(
+      // Valid
+      array('{"type": "array", "items": "long"}', null),
+      // Trailing comma
+      array('{"type": "array", "items": "long", }', "JSON decode error 4: Syntax error"),
+      // Wrong quotes
+      array("{'type': 'array', 'items': 'long'}", "JSON decode error 4: Syntax error"),
+      // Binary data
+      array("\x11\x07", "JSON decode error 3: Control character error, possibly incorrectly encoded"),
+    );
+  }
+
+  /**
+   * @dataProvider parse_bad_json_provider
+   */
+  function test_parse_bad_json($json, $failure)
+  {
+    if (defined('HHVM_VERSION'))
+    {
+      // Under HHVM, json_decode is not as strict and feature complete as standard PHP.
+      $this->markTestSkipped();
+    }
+    try
+    {
+      $schema = AvroSchema::parse($json);
+      $this->assertEquals($failure, null);
+    }
+    catch (AvroSchemaParseException $e)
+    {
+      $this->assertEquals($failure, $e->getMessage());
+    }
   }
 
   /**
@@ -470,6 +512,7 @@ class SchemaTest extends PHPUnit_Framework_TestCase
       $this->assertTrue($example->is_valid,
                         sprintf("schema_string: %s\n",
                                 $schema_string));
+      // strval() roughly does to_avro() + json_encode()
       $this->assertEquals($normalized_schema_string, strval($schema));
     }
     catch (AvroSchemaParseException $e)
@@ -481,4 +524,22 @@ class SchemaTest extends PHPUnit_Framework_TestCase
     }
   }
 
+  function test_record_doc()
+  {
+    $json = '{"type": "record", "name": "foo", "doc": "Foo doc.",
+              "fields": [{"name": "bar", "type": "int", "doc": "Bar doc."}]}';
+    $schema = AvroSchema::parse($json);
+    $this->assertEquals($schema->doc(), "Foo doc.");
+    $fields = $schema->fields();
+    $this->assertCount(1, $fields);
+    $bar = $fields[0];
+    $this->assertEquals($bar->doc(), "Bar doc.");
+  }
+
+  function test_enum_doc()
+  {
+    $json = '{"type": "enum", "name": "blood_types", "doc": "AB is freaky.", "symbols": ["A", "AB", "B", "O"]}';
+    $schema = AvroSchema::parse($json);
+    $this->assertEquals($schema->doc(), "AB is freaky.");
+  }
 }
